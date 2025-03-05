@@ -147,8 +147,8 @@ class SpikingLiquidStateMachine:
         return exp_logits / np.sum(exp_logits)  # Softmax activation
 
 
-data_root = "ds004504/derivatives/"
-tsv_path = "ds004504/participants.tsv"
+data_root = "../ds004504/derivatives/"
+tsv_path = "../ds004504/participants.tsv"
 
 windows, labels = load_and_segment_eeg(data_root, tsv_path)
 print("Segmented EEG shape:", windows.shape)  # (n_windows, 19, window_size)
