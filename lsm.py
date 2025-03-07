@@ -74,7 +74,7 @@ class SpikingLiquidStateMachine:
                  n_reservoir=300, 
                  connectivity=0.2, 
                  spectral_radius=0.9, 
-                 input_scaling=0.2, 
+                 input_scaling=0.25, 
                  leak_rate=0.2, 
                  threshold=0.5, 
                  resting_potential=0.0, 
@@ -144,7 +144,7 @@ class SpikingLiquidStateMachine:
         exp_logits = np.exp(logits - np.max(logits))  # Avoid overflow
         return exp_logits / np.sum(exp_logits)  # Softmax activation
 
-def train_lsm(lsm, X_train, y_train, learning_rate=0.01, epochs=10, batch_size=64):
+def train_lsm(lsm, X_train, y_train, learning_rate=0.001, epochs=10, batch_size=64):
     """
     Train the Liquid State Machine (LSM) using mini-batch training.
     """
