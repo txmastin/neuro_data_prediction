@@ -3,11 +3,8 @@ import matplotlib.pyplot as plt
 import mne
 import os
 import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
-import mne
-import os
-import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score
 
 def load_tsv_labels(tsv_path):
     """
@@ -29,21 +26,22 @@ def load_eeg_data(file_path):
     eeg_data = mne.io.read_raw_eeglab(file_path, preload=True)
     return eeg_data
 
-def segment_eeg(eeg_data, window_size=500, stride=250):
+def segment_eeg(eeg_data, window_size=1000, stride=750):
     """
     Segment EEG data into fixed-size overlapping windows.
     - window_size: Number of time points per window (e.g., 500 for 1s at 500Hz)
     - stride: Overlapping step size (e.g., 250 for 50% overlap)
     """
-    eeg_array = eeg_data.get_data()  # Shape: (n_channels, n_timepoints)
+    eeg_array = eeg_data.get_data() * 1e6 # Shape: (n_channels, n_timepoints) scaled up
     n_channels, n_timepoints = eeg_array.shape
     windows = []
     for start in range(0, n_timepoints - window_size, stride):
         window = eeg_array[:, start:start + window_size]
         windows.append(window)
+
     return np.array(windows)  # Shape: (n_windows, n_channels, window_size)
 
-def load_and_segment_eeg(data_root, tsv_path, window_size=500, stride=250):
+def load_and_segment_eeg(data_root, tsv_path, window_size=1000, stride=750):
     """
     Load EEG recordings from nested subject directories, segment them, and apply class labels from TSV file.
     - data_root: Root directory containing subject subdirectories with .set EEG files
@@ -73,10 +71,10 @@ def load_and_segment_eeg(data_root, tsv_path, window_size=500, stride=250):
 
 class SpikingLiquidStateMachine:
     def __init__(self, 
-                 n_reservoir=1000, 
+                 n_reservoir=300, 
                  connectivity=0.2, 
                  spectral_radius=0.9, 
-                 input_scaling=0.115, 
+                 input_scaling=0.2, 
                  leak_rate=0.2, 
                  threshold=0.5, 
                  resting_potential=0.0, 
@@ -146,11 +144,104 @@ class SpikingLiquidStateMachine:
         exp_logits = np.exp(logits - np.max(logits))  # Avoid overflow
         return exp_logits / np.sum(exp_logits)  # Softmax activation
 
+def train_lsm(lsm, X_train, y_train, learning_rate=0.01, epochs=10, batch_size=64):
+    """
+    Train the Liquid State Machine (LSM) using mini-batch training.
+    """
+    n_samples = X_train.shape[0]
+    
+    for epoch in range(epochs):
+        indices = np.random.permutation(n_samples)  # Shuffle data
+        X_train, y_train = X_train[indices], y_train[indices]
+        epoch_loss = 0
+        
+        for i in range(0, n_samples, batch_size):
+            X_batch = X_train[i:i+batch_size]
+            y_batch = y_train[i:i+batch_size]
+            
+            batch_loss = 0
+            for x, y in zip(X_batch, y_batch):
+                reservoir_memory = []
+                for t in range(x.shape[1]):  # Iterate over time steps
+                    reservoir_activations, _ = lsm.step(x[:, t])
+                    reservoir_memory.append(reservoir_activations)
+                
+                reservoir_feature = np.mean(reservoir_memory, axis=0)
+                prediction = lsm.predict(reservoir_feature)
+                
+                error = np.zeros(3)
+                error[int(y)] = 1  # One-hot target
+                error -= prediction
+                
+                lsm.W_out += learning_rate * np.outer(error, reservoir_feature)  # Update weights
+                batch_loss += np.linalg.norm(error)
+                
+            print(f"Batch loss: {(batch_loss/batch_size):.4f}")
+            epoch_loss += batch_loss / batch_size
+        
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss / (n_samples / batch_size):.4f}")
+
+def evaluate_lsm(lsm, X_test, y_test):
+    """
+    Evaluate the trained LSM on a test set.
+    """
+    y_pred = []
+    for x in X_test:
+        reservoir_memory = []
+        for t in range(x.shape[1]):
+            reservoir_activations, _ = lsm.step(x[:, t])
+            reservoir_memory.append(reservoir_activations)
+        
+        reservoir_feature = np.mean(reservoir_memory, axis=0)
+        prediction = lsm.predict(reservoir_feature)
+        y_pred.append(np.argmax(prediction))
+    
+    accuracy = accuracy_score(y_test, y_pred)
+    print(f"Test Accuracy: {accuracy * 100:.2f}%")
+    return accuracy
+
 
 data_root = "../ds004504/derivatives/"
 tsv_path = "../ds004504/participants.tsv"
 
+'''
 windows, labels = load_and_segment_eeg(data_root, tsv_path)
 print("Segmented EEG shape:", windows.shape)  # (n_windows, 19, window_size)
 print("Labels shape:", labels.shape)  # (n_windows,)
 
+
+from collections import Counter
+
+label_counts = Counter(labels)
+print("Label distribution:", label_counts)
+
+print("First segmented window shape:", windows[0].shape)
+print("First window values (Channel 0):", windows[0, 0, :10])
+'''
+
+X, y = load_and_segment_eeg(data_root, tsv_path)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+lsm = SpikingLiquidStateMachine()
+train_lsm(lsm, X_train, y_train)
+evaluate_lsm(lsm, X_test, y_test)
+
+
+
+'''
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Pick a random sample index
+idx = np.random.randint(len(labels))
+
+# Plot EEG signals for that sample
+plt.figure(figsize=(10, 6))
+for i in range(windows.shape[1]):  # Loop over 19 EEG channels
+    plt.plot(windows[idx, i, :] + i * 10, label=f'Ch {i}')  # Offset each channel
+
+plt.title(f"EEG Window #{idx} | Label: {labels[idx]}")
+plt.xlabel("Time (samples)")
+plt.ylabel("EEG Signal (offset for visibility)")
+plt.legend()
+plt.show()
+'''
