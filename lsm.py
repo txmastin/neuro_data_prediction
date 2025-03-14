@@ -6,6 +6,10 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 
+import optuna
+import joblib  # For parallel execution
+
+
 def load_tsv_labels(tsv_path):
     """
     Load subject labels from a TSV file and map group labels to numerical values.
@@ -26,7 +30,7 @@ def load_eeg_data(file_path):
     eeg_data = mne.io.read_raw_eeglab(file_path, preload=True)
     return eeg_data
 
-def segment_eeg(eeg_data, window_size=1000, stride=750):
+def segment_eeg(eeg_data, window_size=1000, stride=250):
     """
     Segment EEG data into fixed-size overlapping windows.
     - window_size: Number of time points per window (e.g., 500 for 1s at 500Hz)
@@ -71,10 +75,10 @@ def load_and_segment_eeg(data_root, tsv_path, window_size=1000, stride=750):
 
 class SpikingLiquidStateMachine:
     def __init__(self, 
-                 n_reservoir=300, 
+                 n_reservoir=1000, 
                  connectivity=0.2, 
                  spectral_radius=0.9, 
-                 input_scaling=0.25, 
+                 input_scaling=0.5, 
                  leak_rate=0.2, 
                  threshold=0.5, 
                  resting_potential=0.0, 
@@ -144,7 +148,7 @@ class SpikingLiquidStateMachine:
         exp_logits = np.exp(logits - np.max(logits))  # Avoid overflow
         return exp_logits / np.sum(exp_logits)  # Softmax activation
 
-def train_lsm(lsm, X_train, y_train, learning_rate=0.001, epochs=10, batch_size=64):
+def train_lsm(lsm, X_train, y_train, learning_rate=0.001, epochs=3, batch_size=64):
     """
     Train the Liquid State Machine (LSM) using mini-batch training.
     """
@@ -176,10 +180,8 @@ def train_lsm(lsm, X_train, y_train, learning_rate=0.001, epochs=10, batch_size=
                 lsm.W_out += learning_rate * np.outer(error, reservoir_feature)  # Update weights
                 batch_loss += np.linalg.norm(error)
                 
-            print(f"Batch loss: {(batch_loss/batch_size):.4f}")
             epoch_loss += batch_loss / batch_size
         
-        print(f"Epoch {epoch+1}/{epochs}, Loss: {epoch_loss / (n_samples / batch_size):.4f}")
 
 def evaluate_lsm(lsm, X_test, y_test):
     """
@@ -220,12 +222,48 @@ print("First window values (Channel 0):", windows[0, 0, :10])
 '''
 
 X, y = load_and_segment_eeg(data_root, tsv_path)
+X = X[:, :, :1000]
+
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-lsm = SpikingLiquidStateMachine()
-train_lsm(lsm, X_train, y_train)
-evaluate_lsm(lsm, X_test, y_test)
 
+def objective(trial):
+    """
+    Objective function for Optuna to optimize LSM hyperparameters.
+    """
+    # Define the hyperparameters to optimize
+    n_reservoir = trial.suggest_int("n_reservoir", 300, 900, step=300)
+    connectivity = trial.suggest_float("connectivity", 0.1, 0.4, step=0.05)
+    spectral_radius = trial.suggest_float("spectral_radius", 0.1, 1.5)
+    input_scaling = trial.suggest_float("input_scaling", 0.1, 1.0)
+    leak_rate = trial.suggest_float("leak_rate", 0.05, 0.5)
+    threshold = trial.suggest_float("threshold", 0.1, 1.0)
+    refractory_period = trial.suggest_int("refractory_period", 1, 5)
 
+    # Create LSM with sampled hyperparameters
+    lsm = SpikingLiquidStateMachine(
+        n_reservoir=n_reservoir,
+        connectivity=connectivity,
+        spectral_radius=spectral_radius,
+        input_scaling=input_scaling,
+        leak_rate=leak_rate,
+        threshold=threshold,
+        refractory_period=refractory_period
+    )
+
+    # Train and evaluate the LSM
+    train_lsm(lsm, X_train, y_train, learning_rate=0.001, epochs=3, batch_size=64)
+    accuracy = evaluate_lsm(lsm, X_test, y_test)
+
+    return accuracy  # Optuna maximizes this value
+
+# Run the Optuna optimization with parallelization
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=10, n_jobs=-1, show_progress_bar=True)  # Use all CPU cores
+
+# Print best parameters found
+print("Best Hyperparameters:", study.best_params)
+
+joblib.dump(study, "optuna_lsm_study.pkl")
 
 '''
 import numpy as np
